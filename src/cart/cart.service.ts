@@ -1,4 +1,8 @@
-import { Injectable, ConflictException, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  ConflictException,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In } from 'typeorm';
 import { Cart } from './entities/cart.entity';
@@ -99,7 +103,8 @@ export class CartService {
     });
 
     const invalidItemsCount = viewItems.filter(
-      (v) => v.flags.outOfStock || v.flags.insufficientStock || v.flags.priceChanged,
+      (v) =>
+        v.flags.outOfStock || v.flags.insufficientStock || v.flags.priceChanged,
     ).length;
 
     const subtotal = this.money(
@@ -118,7 +123,7 @@ export class CartService {
         discount,
         tax,
         total,
-        currency: 'USD',
+        currency: 'ARS',
         invalidItemsCount,
         // alias para front
         subTotal: subtotal,
@@ -186,7 +191,7 @@ export class CartService {
 
   async updateItemQty(
     userId: string,
-    productId: string,   // sigue aceptando productId
+    productId: string, // sigue aceptando productId
     qty: number,
   ): Promise<CartView> {
     const cart = await this.findOrCreateCart(userId);
