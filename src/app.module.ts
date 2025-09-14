@@ -21,12 +21,14 @@ import { ScheduleModule } from '@nestjs/schedule';
 import { MailModule } from './mail/mail.module';
 import { FavoritesModule } from './favorite/favorite.module';
 import { CommentsModule } from './comments/comments.module';
+import { ChatModule } from './chat/chat.module';
 
 @Module({
   imports: [
     OrdersModule,
     MailModule,
     UsersModule,
+    ChatModule,
     ProductsModule,
     AuthModule,
     CategoriesModule,
