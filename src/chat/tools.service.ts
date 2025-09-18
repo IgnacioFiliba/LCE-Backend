@@ -1,4 +1,3 @@
-// src/chat/tools.service.ts
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { ForbiddenException, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -8,7 +7,8 @@ import { Orders } from 'src/orders/entities/order.entity';
 import { Users } from 'src/users/entities/user.entity';
 
 type FindArgs = {
-  tokens?: string[];
+  tokens?: string[];       // tokens de texto (aceite, filtro, etc.)
+  gradeTokens?: string[];  // tokens de grado (5w40, 0w20, etc.)
   brand?: string;
   model?: string;
   engine?: string;
@@ -19,6 +19,20 @@ type FindArgs = {
   limit?: number;
 };
 
+function makeGradeVariants(grade: string): string[] {
+  // 5w40 -> variantes para LIKE (maneja espacios/hífen)
+  const m = grade.match(/^(\d{1,2})w(\d{2})$/i);
+  if (!m) return [`%${grade.toLowerCase()}%`];
+  const a = m[1], b = m[2];
+  return [
+    `%${a}w${b}%`,
+    `%${a}w-${b}%`,
+    `%${a} w ${b}%`,
+    `%${a} w-${b}%`,
+    `%${a}w ${b}%`,
+  ];
+}
+
 @Injectable()
 export class ChatToolsService {
   constructor(
@@ -27,104 +41,190 @@ export class ChatToolsService {
     @InjectRepository(Users) private usersRepo: Repository<Users>,
   ) {}
 
-  /** Paso 1: búsqueda estricta (AND entre tokens, respeta inStock/rango de precio) */
+  // ---------- PRODUCT SEARCH con múltiples estrategias ----------
+  private baseOrder(qb: ReturnType<Repository<Products>['createQueryBuilder']>, limit?: number) {
+    qb.orderBy('p.stock', 'DESC')
+      .addOrderBy('p.name', 'ASC')
+      .take(Math.min(limit ?? 12, 30));
+  }
+
+  private applyCommonFilters(qb: any, args: FindArgs) {
+    if (args.brand) qb.andWhere('p.brand ILIKE :b', { b: `%${args.brand}%` });
+    if (args.model) qb.andWhere('p.model ILIKE :m', { m: `%${args.model}%` });
+    if (args.engine) qb.andWhere('p.engine ILIKE :e', { e: `%${args.engine}%` });
+    if (args.year != null) qb.andWhere('p.year = :y', { y: String(args.year) });
+    if (args.priceMin != null) qb.andWhere('p.price >= :min', { min: args.priceMin });
+    if (args.priceMax != null) qb.andWhere('p.price <= :max', { max: args.priceMax });
+    if (args.inStock != null) qb.andWhere(args.inStock ? 'p.stock >= 1' : 'p.stock <= 0');
+  }
+
+  // Estrategia A: AND entre tokens + AND entre grados (cada grado puede aparecer en name/brand/model/engine/description con variaciones)
   private async searchStrict(args: FindArgs) {
     const qb = this.productsRepo.createQueryBuilder('p');
 
     if (args.tokens?.length) {
       args.tokens.slice(0, 8).forEach((t, i) => {
         const like = `%${t.toLowerCase()}%`;
-        qb.andWhere(
-          new Brackets((w) => {
-            w.where('LOWER(p.name) LIKE :t', { t: like })
-              .orWhere('LOWER(p.brand) LIKE :t', { t: like })
-              .orWhere('LOWER(p.model) LIKE :t', { t: like })
-              .orWhere('LOWER(p.engine) LIKE :t', { t: like })
-              .orWhere('LOWER(p.description) LIKE :t', { t: like });
-          }),
-        );
+        qb.andWhere(new Brackets((w) => {
+          w.where('LOWER(p.name) LIKE :t' + i, { ['t' + i]: like })
+            .orWhere('LOWER(p.brand) LIKE :t' + i, { ['t' + i]: like })
+            .orWhere('LOWER(p.model) LIKE :t' + i, { ['t' + i]: like })
+            .orWhere('LOWER(p.engine) LIKE :t' + i, { ['t' + i]: like })
+            .orWhere('LOWER(p.description) LIKE :t' + i, { ['t' + i]: like });
+        }));
       });
     }
 
-    if (args.brand) qb.andWhere('LOWER(p.brand) LIKE LOWER(:b)', { b: `%${args.brand}%` });
-    if (args.model) qb.andWhere('LOWER(p.model) LIKE LOWER(:m)', { m: `%${args.model}%` });
-    if (args.engine) qb.andWhere('LOWER(p.engine) LIKE LOWER(:e)', { e: `%${args.engine}%` });
-    if (args.year != null) qb.andWhere('p.year = :y', { y: String(args.year) });
-    if (args.priceMin != null) qb.andWhere('p.price >= :min', { min: args.priceMin });
-    if (args.priceMax != null) qb.andWhere('p.price <= :max', { max: args.priceMax });
-    if (args.inStock != null) qb.andWhere(args.inStock ? 'p.stock >= 1' : 'p.stock <= 0');
+    if (args.gradeTokens?.length) {
+      args.gradeTokens.slice(0, 3).forEach((g, i) => {
+        const variants = makeGradeVariants(g.toLowerCase());
+        qb.andWhere(new Brackets((w) => {
+          variants.forEach((pat, j) => {
+            const key = `g${i}_${j}`;
+            w.orWhere('p.name ILIKE :' + key, { [key]: pat })
+             .orWhere('p.brand ILIKE :' + key, { [key]: pat })
+             .orWhere('p.model ILIKE :' + key, { [key]: pat })
+             .orWhere('p.engine ILIKE :' + key, { [key]: pat })
+             .orWhere('p.description ILIKE :' + key, { [key]: pat });
+          });
+        }));
+      });
+    }
 
-    qb.orderBy('p.stock', 'DESC').addOrderBy('p.name', 'ASC').take(Math.min(args.limit ?? 8, 20));
-
+    this.applyCommonFilters(qb, args);
+    this.baseOrder(qb, args.limit);
     return qb.getMany();
   }
 
-  /** Paso 2: si no hay resultados, relaja `inStock` (por si el dato está desactualizado) */
-  private async searchNoStockFilter(args: FindArgs) {
-    const relaxed: FindArgs = { ...args, inStock: undefined };
-    return this.searchStrict(relaxed);
-  }
-
-  /** Paso 3: si aún no hay, usar OR entre *todos* los tokens (recall alto) */
-  private async searchLooseOr(args: FindArgs) {
+  // Estrategia B: relajamos inStock
+  private async searchRelaxStock(args: FindArgs) {
     const qb = this.productsRepo.createQueryBuilder('p');
 
     if (args.tokens?.length) {
-      const likes = args.tokens.slice(0, 8).map((t) => `%${t.toLowerCase()}%`);
-      qb.andWhere(
-        new Brackets((w) => {
-          likes.forEach((like, idx) => {
-            const alias = `t${idx}`;
-            w.orWhere(
-              new Brackets((w2) => {
-                w2.where(`LOWER(p.name) LIKE :${alias}`, { [alias]: like })
-                  .orWhere(`LOWER(p.brand) LIKE :${alias}`, { [alias]: like })
-                  .orWhere(`LOWER(p.model) LIKE :${alias}`, { [alias]: like })
-                  .orWhere(`LOWER(p.engine) LIKE :${alias}`, { [alias]: like })
-                  .orWhere(`LOWER(p.description) LIKE :${alias}`, { [alias]: like });
-              }),
-            );
-          });
-        }),
-      );
+      qb.andWhere(new Brackets(w => {
+        args.tokens!.slice(0, 8).forEach((t, i) => {
+          const like = `%${t.toLowerCase()}%`;
+          w.andWhere(new Brackets(w2 => {
+            w2.where('LOWER(p.name) LIKE :t' + i, { ['t' + i]: like })
+              .orWhere('LOWER(p.brand) LIKE :t' + i, { ['t' + i]: like })
+              .orWhere('LOWER(p.model) LIKE :t' + i, { ['t' + i]: like })
+              .orWhere('LOWER(p.engine) LIKE :t' + i, { ['t' + i]: like })
+              .orWhere('LOWER(p.description) LIKE :t' + i, { ['t' + i]: like });
+          }));
+        });
+      }));
     }
 
-    if (args.brand) qb.andWhere('LOWER(p.brand) LIKE LOWER(:b)', { b: `%${args.brand}%` });
-    if (args.priceMin != null) qb.andWhere('p.price >= :min', { min: args.priceMin });
-    if (args.priceMax != null) qb.andWhere('p.price <= :max', { max: args.priceMax });
+    if (args.gradeTokens?.length) {
+      qb.andWhere(new Brackets(w => {
+        args.gradeTokens!.slice(0, 3).forEach((g, i) => {
+          const variants = makeGradeVariants(g.toLowerCase());
+          w.andWhere(new Brackets(w2 => {
+            variants.forEach((pat, j) => {
+              const key = `rg${i}_${j}`;
+              w2.orWhere('p.name ILIKE :' + key, { [key]: pat })
+                .orWhere('p.brand ILIKE :' + key, { [key]: pat })
+                .orWhere('p.model ILIKE :' + key, { [key]: pat })
+                .orWhere('p.engine ILIKE :' + key, { [key]: pat })
+                .orWhere('p.description ILIKE :' + key, { [key]: pat });
+            });
+          }));
+        });
+      }));
+    }
 
-    qb.orderBy('p.stock', 'DESC').addOrderBy('p.name', 'ASC').take(Math.min(args.limit ?? 8, 20));
-
+    // Igual que la A pero sin forzar inStock
+    const relaxed: FindArgs = { ...args, inStock: undefined };
+    this.applyCommonFilters(qb, relaxed);
+    this.baseOrder(qb, args.limit);
     return qb.getMany();
   }
 
-  /** Paso 4: búsqueda por grado de aceite solamente (si había alguno) */
+  // Estrategia C: OR global entre todos los tokens (recall alto)
+  private async searchLooseOr(args: FindArgs) {
+    const qb = this.productsRepo.createQueryBuilder('p');
+
+    // OR de text-tokens
+    if (args.tokens?.length) {
+      qb.andWhere(new Brackets((w) => {
+        args.tokens!.slice(0, 8).forEach((t, i) => {
+          const like = `%${t.toLowerCase()}%`;
+          const alias = `lt${i}`;
+          w.orWhere('LOWER(p.name) LIKE :' + alias, { [alias]: like })
+            .orWhere('LOWER(p.brand) LIKE :' + alias, { [alias]: like })
+            .orWhere('LOWER(p.model) LIKE :' + alias, { [alias]: like })
+            .orWhere('LOWER(p.engine) LIKE :' + alias, { [alias]: like })
+            .orWhere('LOWER(p.description) LIKE :' + alias, { [alias]: like });
+        });
+      }));
+    }
+
+    // OR de grados (con variantes)
+    if (args.gradeTokens?.length) {
+      qb.andWhere(new Brackets(w => {
+        args.gradeTokens!.slice(0, 3).forEach((g, i) => {
+          const variants = makeGradeVariants(g.toLowerCase());
+          variants.forEach((pat, j) => {
+            const key = `lg${i}_${j}`;
+            w.orWhere('p.name ILIKE :' + key, { [key]: pat })
+             .orWhere('p.brand ILIKE :' + key, { [key]: pat })
+             .orWhere('p.model ILIKE :' + key, { [key]: pat })
+             .orWhere('p.engine ILIKE :' + key, { [key]: pat })
+             .orWhere('p.description ILIKE :' + key, { [key]: pat });
+          });
+        });
+      }));
+    }
+
+    // Relajamos también inStock
+    const relaxed: FindArgs = { ...args, inStock: undefined };
+    this.applyCommonFilters(qb, relaxed);
+    this.baseOrder(qb, args.limit);
+    return qb.getMany();
+  }
+
+  // Estrategia D: solo grado (si vino alguno)
   private async searchByOilGradeOnly(args: FindArgs) {
-    const grade = args.tokens?.find((t) => /^\d{1,2}w\d{2}$/.test(t));
-    if (!grade) return [];
-    const qb = this.productsRepo.createQueryBuilder('p')
-      .where('LOWER(p.name) LIKE :g OR LOWER(p.description) LIKE :g', { g: `%${grade}%` })
-      .orderBy('p.stock', 'DESC')
-      .addOrderBy('p.name', 'ASC')
-      .take(Math.min(args.limit ?? 8, 20));
+    if (!args.gradeTokens?.length) return [];
+    const qb = this.productsRepo.createQueryBuilder('p');
 
+    qb.andWhere(new Brackets(w => {
+      args.gradeTokens!.slice(0, 3).forEach((g, i) => {
+        const variants = makeGradeVariants(g.toLowerCase());
+        variants.forEach((pat, j) => {
+          const key = `og${i}_${j}`;
+          w.orWhere('p.name ILIKE :' + key, { [key]: pat })
+              .orWhere('p.brand ILIKE :' + key, { [key]: pat })
+              .orWhere('p.model ILIKE :' + key, { [key]: pat })
+              .orWhere('p.engine ILIKE :' + key, { [key]: pat })
+              .orWhere('p.description ILIKE :' + key, { [key]: pat });
+        });
+      });
+    }));
+
+    // Sin inStock forzado y sin rango para maximizar recall
+    this.baseOrder(qb, args.limit);
     return qb.getMany();
   }
 
-  /** API principal: intenta varias estrategias con fallback */
+  /** API principal con fallbacks encadenados */
   async findProducts(args: FindArgs) {
     try {
-      const first = await this.searchStrict(args);
-      if (first.length) return this.mapProducts(first);
+      // 1) Estricto
+      const a = await this.searchStrict(args);
+      if (a.length) return this.mapProducts(a);
 
-      const second = await this.searchNoStockFilter(args);
-      if (second.length) return this.mapProducts(second);
+      // 2) Sin inStock
+      const b = await this.searchRelaxStock(args);
+      if (b.length) return this.mapProducts(b);
 
-      const third = await this.searchLooseOr(args);
-      if (third.length) return this.mapProducts(third);
+      // 3) OR global
+      const c = await this.searchLooseOr(args);
+      if (c.length) return this.mapProducts(c);
 
-      const fourth = await this.searchByOilGradeOnly(args);
-      if (fourth.length) return this.mapProducts(fourth);
+      // 4) Solo grado
+      const d = await this.searchByOilGradeOnly(args);
+      if (d.length) return this.mapProducts(d);
 
       return [];
     } catch (e: any) {
@@ -149,6 +249,7 @@ export class ChatToolsService {
     }));
   }
 
+  // ---------- ÓRDENES ----------
   async getOrderById(args: { id: string; requesterUserId?: string; isAdmin?: boolean }) {
     try {
       const qb = this.ordersRepo
@@ -230,7 +331,9 @@ export class ChatToolsService {
   async listOrdersByEmail(args: { email: string; requesterIsAdmin?: boolean }) {
     try {
       if (!args.requesterIsAdmin) throw new ForbiddenException('Solo admin puede buscar por email.');
-      const user = await this.usersRepo.findOne({ where: { email: args.email } });
+      const user = await this.usersRepo.findOne({
+        where: { email: args.email },
+      });
       if (!user) return [];
       const rows = await this.ordersRepo.find({
         where: { user: { id: user.id } },
