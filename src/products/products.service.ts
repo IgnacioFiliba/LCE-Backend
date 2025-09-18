@@ -105,6 +105,16 @@ export class ProductsService {
     };
   }
 
+  // helper para arrays desde CSV/arrays
+  private ensureArray(v?: string[] | string): string[] {
+    if (!v) return [];
+    if (Array.isArray(v)) return v.filter(Boolean).map((s) => s.trim());
+    return String(v)
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+
   /* ------------------------------ CRUD ------------------------------- */
 
   async create(
@@ -198,47 +208,6 @@ export class ProductsService {
   }
 
   /* ----------------------- LISTADOS / FILTROS ------------------------ */
-
-  async getProducts(
-    page: number,
-    limit: number,
-    search?: string,
-  ): Promise<Products[]> {
-    const qb = this.productRepository
-      .createQueryBuilder('p')
-      .leftJoinAndSelect('p.category', 'c')
-      .leftJoinAndSelect('p.comments', 'cm')
-      .leftJoinAndSelect('cm.user', 'u');
-
-    const term = (search ?? '').trim();
-    if (term.length > 0) {
-      qb.where(
-        `
-          p.name ILIKE :term
-          OR p.brand ILIKE :term
-          OR p.model ILIKE :term
-          OR p.description ILIKE :term
-          OR p.engine ILIKE :term
-          OR c.name ILIKE :term
-          OR CAST(p.year AS TEXT) ILIKE :term
-        `,
-        { term: `%${term}%` },
-      );
-    }
-
-    qb.skip((page - 1) * limit).take(limit);
-    return qb.getMany();
-  }
-
-  // helper para arrays desde CSV/arrays
-  private ensureArray(v?: string[] | string): string[] {
-    if (!v) return [];
-    if (Array.isArray(v)) return v.filter(Boolean).map((s) => s.trim());
-    return String(v)
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean);
-  }
 
   async findAllWithFilters(q: FindProductsQuery): Promise<{
     items: Products[];
@@ -345,8 +314,26 @@ export class ProductsService {
     return product;
   }
 
-  /* ---------------- FACETS ---------------- */
-  async getFacets() {
+  /* ---------------- FACETS (FILTRADAS) ---------------- */
+
+  /**
+   * Devuelve facets (brands, models, engines, categories) consistentes con los filtros actuales.
+   * Acepta los mismos parámetros que findAllWithFilters, pero solo selecciona columnas de facets.
+   */
+  async getFacets(q: Partial<FindProductsQuery> = {}) {
+    const {
+      search,
+      brands,
+      models,
+      engines,
+      categoryId,
+      inStock,
+      yearMin,
+      yearMax,
+      priceMin,
+      priceMax,
+    } = q;
+
     const qb = this.productRepository
       .createQueryBuilder('p')
       .leftJoin('p.category', 'c')
@@ -358,26 +345,68 @@ export class ProductsService {
         'c.name AS category_name',
       ]);
 
+    // mismos filtros para mantener consistencia
+    const term = (search ?? '').trim();
+    if (term.length > 0) {
+      qb.andWhere(
+        `(
+          p.name ILIKE :s OR
+          p.brand ILIKE :s OR
+          p.model ILIKE :s OR
+          p.description ILIKE :s OR
+          p.engine ILIKE :s OR
+          c.name ILIKE :s OR
+          CAST(p.year AS TEXT) ILIKE :s
+        )`,
+        { s: `%${term}%` },
+      );
+    }
+
+    const bArr = this.ensureArray(brands);
+    if (bArr.length) qb.andWhere('p.brand IN (:...brands)', { brands: bArr });
+
+    const mArr = this.ensureArray(models);
+    if (mArr.length) qb.andWhere('p.model IN (:...models)', { models: mArr });
+
+    const eArr = this.ensureArray(engines);
+    if (eArr.length)
+      qb.andWhere('p.engine IN (:...engines)', { engines: eArr });
+
+    if (categoryId) qb.andWhere('c.id = :cid', { cid: categoryId });
+
+    if (inStock === 'true') qb.andWhere('p.stock > 0');
+    if (inStock === 'false') qb.andWhere('p.stock <= 0');
+
+    if (yearMin !== undefined)
+      qb.andWhere('p.year >= :ymin', { ymin: yearMin });
+    if (yearMax !== undefined)
+      qb.andWhere('p.year <= :ymax', { ymax: yearMax });
+
+    if (priceMin !== undefined)
+      qb.andWhere('p.price >= :pmin', { pmin: priceMin });
+    if (priceMax !== undefined)
+      qb.andWhere('p.price <= :pmax', { pmax: priceMax });
+
     const raw = await qb.getRawMany();
 
-    const brands = new Set<string>();
-    const models = new Set<string>();
-    const engines = new Set<string>();
+    const brandsSet = new Set<string>();
+    const modelsSet = new Set<string>();
+    const enginesSet = new Set<string>();
     const categoriesMap = new Map<string, string>();
 
     raw.forEach((row) => {
-      if (row.brand) brands.add(row.brand);
-      if (row.model) models.add(row.model);
-      if (row.engine) engines.add(row.engine);
+      if (row.brand) brandsSet.add(row.brand);
+      if (row.model) modelsSet.add(row.model);
+      if (row.engine) enginesSet.add(row.engine);
       if (row.category_id && row.category_name) {
         categoriesMap.set(row.category_id, row.category_name);
       }
     });
 
     return {
-      brands: Array.from(brands).sort(),
-      models: Array.from(models).sort(),
-      engines: Array.from(engines).sort(),
+      brands: Array.from(brandsSet).sort(),
+      models: Array.from(modelsSet).sort(),
+      engines: Array.from(enginesSet).sort(),
       categories: Array.from(categoriesMap, ([id, name]) => ({ id, name })),
     };
   }

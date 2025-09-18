@@ -112,14 +112,23 @@ export class ProductsController {
 
   @ApiOperation({
     summary:
-      'Obtener todas las marcas, modelos, motores y categorías distintas',
+      'Obtener marcas, modelos, motores y categorías. Soporta filtros para devolver facets consistentes con la búsqueda.',
   })
+  @ApiQuery({ name: 'search', required: false, description: 'Texto parcial' })
+  @ApiQuery({ name: 'brands', required: false, description: 'CSV o array' })
+  @ApiQuery({ name: 'models', required: false, description: 'CSV o array' })
+  @ApiQuery({ name: 'engines', required: false, description: 'CSV o array' })
+  @ApiQuery({ name: 'categoryId', required: false, description: 'UUID' })
+  @ApiQuery({ name: 'inStock', required: false, description: 'true|false' })
+  @ApiQuery({ name: 'yearMin', required: false, type: Number })
+  @ApiQuery({ name: 'yearMax', required: false, type: Number })
+  @ApiQuery({ name: 'priceMin', required: false, type: Number })
+  @ApiQuery({ name: 'priceMax', required: false, type: Number })
   @Get('facets')
-  async getFacets() {
-    return this.productsService.getFacets();
+  async getFacets(@Query() query: FindProductsQuery) {
+    return this.productsService.getFacets(query);
   }
 
-  // 🔹 GET con búsqueda + filtros
   @ApiOperation({
     summary: 'Obtener productos con búsqueda y filtros (incluye comentarios)',
   })
@@ -127,11 +136,7 @@ export class ProductsController {
   @ApiQuery({ name: 'brands', required: false, description: 'CSV o array' })
   @ApiQuery({ name: 'models', required: false, description: 'CSV o array' })
   @ApiQuery({ name: 'engines', required: false, description: 'CSV o array' })
-  @ApiQuery({
-    name: 'categoryId',
-    required: false,
-    description: 'UUID de categoría',
-  })
+  @ApiQuery({ name: 'categoryId', required: false, description: 'UUID' })
   @ApiQuery({ name: 'inStock', required: false, description: 'true | false' })
   @ApiQuery({ name: 'yearMin', required: false, type: Number })
   @ApiQuery({ name: 'yearMax', required: false, type: Number })
